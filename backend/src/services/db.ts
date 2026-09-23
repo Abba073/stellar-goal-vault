@@ -199,6 +199,14 @@ function migrate(database: SQLiteDatabase): void {
     CREATE INDEX IF NOT EXISTS idx_pledges_contributor ON pledges(contributor, created_at, id);
     CREATE INDEX IF NOT EXISTS idx_campaign_events_campaign_id ON campaign_events(campaign_id);
     CREATE INDEX IF NOT EXISTS idx_campaign_events_timestamp ON campaign_events(timestamp);
+    CREATE TABLE IF NOT EXISTS campaign_comments (
+      id            INTEGER PRIMARY KEY AUTOINCREMENT,
+      campaign_id   TEXT NOT NULL,
+      author        TEXT NOT NULL,
+      body          TEXT NOT NULL,
+      created_at    INTEGER NOT NULL,
+      FOREIGN KEY (campaign_id) REFERENCES campaigns(id)
+    );
     CREATE INDEX IF NOT EXISTS idx_comments_campaign_id ON campaign_comments(campaign_id);
     CREATE INDEX IF NOT EXISTS idx_comments_created_at ON campaign_comments(created_at);
   `);

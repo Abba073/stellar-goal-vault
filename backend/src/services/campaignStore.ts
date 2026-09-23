@@ -814,42 +814,47 @@ export function createCampaign(input: CampaignInput): CampaignRecord {
     maxPerContributor: input.maxPerContributor,
   };
 
-  db.prepare(
-    `INSERT INTO campaigns (
-      id, creator, title, description, accepted_tokens_json, target_amount, pledged_amount, deadline, created_at, claimed_at, failed_at, metadata_json, max_per_contributor
-    ) VALUES (
-      ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-    )`,
-  ).run(
-    campaign.id,
-    campaign.creator,
-    campaign.title,
-    campaign.description,
-    JSON.stringify(campaign.acceptedTokens),
-    campaign.targetAmount,
-    campaign.pledgedAmount,
-    campaign.deadline,
-    campaign.createdAt,
-    null,
-    null,
-    campaign.metadata ? JSON.stringify(campaign.metadata) : null,
-    campaign.maxPerContributor ?? null,
-  );
+  // Wrap the campaign row insert and its initial "created" event in a single
+  // transaction so that a partial write (e.g. the event insert failing) never
+  // leaves an orphaned campaign row with no history, and a retry remains safe.
+  db.transaction(() => {
+    db.prepare(
+      `INSERT INTO campaigns (
+        id, creator, title, description, accepted_tokens_json, target_amount, pledged_amount, deadline, created_at, claimed_at, failed_at, metadata_json, max_per_contributor
+      ) VALUES (
+        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+      )`,
+    ).run(
+      campaign.id,
+      campaign.creator,
+      campaign.title,
+      campaign.description,
+      JSON.stringify(campaign.acceptedTokens),
+      campaign.targetAmount,
+      campaign.pledgedAmount,
+      campaign.deadline,
+      campaign.createdAt,
+      null,
+      null,
+      campaign.metadata ? JSON.stringify(campaign.metadata) : null,
+      campaign.maxPerContributor ?? null,
+    );
 
-  recordEvent(
-    campaign.id,
-    'created',
-    campaign.createdAt,
-    campaign.creator,
-    undefined,
-    {
-      title: campaign.title,
-      acceptedTokens: campaign.acceptedTokens,
-      targetAmount: campaign.targetAmount,
-      deadline: campaign.deadline,
-    },
-    { source: 'local' } as BlockchainMetadata,
-  );
+    recordEvent(
+      campaign.id,
+      'created',
+      campaign.createdAt,
+      campaign.creator,
+      undefined,
+      {
+        title: campaign.title,
+        acceptedTokens: campaign.acceptedTokens,
+        targetAmount: campaign.targetAmount,
+        deadline: campaign.deadline,
+      },
+      { source: 'local' } as BlockchainMetadata,
+    );
+  })();
 
   return campaign;
 }
@@ -1415,26 +1420,33 @@ export function refundContributor(
   const refundedAmount = round(refundablePledges.reduce((sum, pledge) => sum + pledge.amount, 0));
   const refundedAt = reconciliation?.createdAt ?? nowInSeconds();
 
-  db.prepare(
-    `UPDATE pledges SET refunded_at = ? WHERE campaign_id = ? AND contributor = ? AND refunded_at IS NULL`,
-  ).run(refundedAt, campaignId, contributor);
+  // Wrap all state mutations in an explicit transaction so that a mid-operation
+  // failure (e.g. the campaign balance update or event insert failing) leaves no
+  // partial state behind.  Both the pledge rows and the campaign total must be
+  // updated together; if either step fails the entire operation rolls back and
+  // the caller can safely retry.
+  db.transaction(() => {
+    db.prepare(
+      `UPDATE pledges SET refunded_at = ? WHERE campaign_id = ? AND contributor = ? AND refunded_at IS NULL`,
+    ).run(refundedAt, campaignId, contributor);
 
-  db.prepare(`UPDATE campaigns SET pledged_amount = pledged_amount - ? WHERE id = ?`).run(
-    refundedAmount,
-    campaignId,
-  );
+    db.prepare(`UPDATE campaigns SET pledged_amount = pledged_amount - ? WHERE id = ?`).run(
+      refundedAmount,
+      campaignId,
+    );
 
-  recordEvent(campaignId, 'refunded', refundedAt, contributor, refundedAmount, {
-    refundedPledgeCount: refundablePledges.length,
-    refundSource: reconciliation?.source ?? 'local',
-    txHash: reconciliation?.txHash,
-    contractId: reconciliation?.contractId,
-    networkPassphrase: reconciliation?.networkPassphrase,
-    rpcUrl: reconciliation?.rpcUrl,
-    walletAddress: reconciliation?.walletAddress,
-    ledger: reconciliation?.ledger,
-    latestLedger: reconciliation?.latestLedger,
-  });
+    recordEvent(campaignId, 'refunded', refundedAt, contributor, refundedAmount, {
+      refundedPledgeCount: refundablePledges.length,
+      refundSource: reconciliation?.source ?? 'local',
+      txHash: reconciliation?.txHash,
+      contractId: reconciliation?.contractId,
+      networkPassphrase: reconciliation?.networkPassphrase,
+      rpcUrl: reconciliation?.rpcUrl,
+      walletAddress: reconciliation?.walletAddress,
+      ledger: reconciliation?.ledger,
+      latestLedger: reconciliation?.latestLedger,
+    });
+  })();
 
   void dispatchWebhook('pledge_refunded', campaignId, {
     contributor,
