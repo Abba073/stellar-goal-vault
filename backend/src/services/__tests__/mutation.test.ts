@@ -97,6 +97,7 @@ afterAll(() => {
 beforeEach(() => {
   const db = getDb();
   db.prepare('DELETE FROM campaign_events').run();
+  db.prepare('DELETE FROM notifications').run();
   db.prepare('DELETE FROM pledges').run();
   db.prepare('DELETE FROM campaigns').run();
 });
